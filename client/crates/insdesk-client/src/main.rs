@@ -1,10 +1,14 @@
 //! InsDesk controller.
 //!
-//! The default build is a headless CLI controller: it connects to a host over
-//! the end-to-end-encrypted channel and can snapshot the remote screen, browse
-//! the remote filesystem, and transfer files in both directions. Built with
-//! `--features gui`, the `gui` subcommand launches a graphical controller that
-//! renders the live stream and forwards mouse/keyboard input.
+//! Built with `--features gui`, running the binary with no arguments (e.g. by
+//! double-clicking it) launches the full desktop app window. The same binary
+//! still supports headless/scriptable actions (`--ls`, `--snapshot`,
+//! `--download`, `--upload`). Without the `gui` feature it is a headless-only
+//! controller.
+
+// On Windows GUI builds, use the "windows" subsystem so double-clicking the exe
+// opens the app without a console window flashing behind it.
+#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
 
 mod connect;
 #[cfg(feature = "gui")]
@@ -103,13 +107,21 @@ async fn main() -> Result<()> {
         fps: args.fps,
     };
 
-    if args.gui {
-        #[cfg(feature = "gui")]
-        {
+    // In a GUI build, launch the window when asked (--gui) or by default (e.g.
+    // when the exe is double-clicked with no scriptable action flags).
+    #[cfg(feature = "gui")]
+    {
+        let wants_headless = args.ls.is_some()
+            || !args.download.is_empty()
+            || !args.upload.is_empty()
+            || args.snapshot.is_some();
+        if args.gui || !wants_headless {
             return gui::run(opts);
         }
-        #[cfg(not(feature = "gui"))]
-        {
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        if args.gui {
             anyhow::bail!("this binary was built without the `gui` feature; rebuild with --features gui");
         }
     }

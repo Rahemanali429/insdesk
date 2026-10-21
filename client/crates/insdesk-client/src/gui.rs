@@ -31,6 +31,14 @@ struct ConnectRequest {
     password: String,
 }
 
+/// Commands the UI sends to the background runtime.
+enum RuntimeCmd {
+    /// Open an outgoing session to a partner.
+    Connect(ConnectRequest),
+    /// Point the background host at a different relay (reconnects).
+    SetRelay(String),
+}
+
 /// Status of the always-on background host.
 #[derive(Clone)]
 enum HostStatus {
@@ -58,11 +66,11 @@ pub fn run(opts: ConnectOpts) -> anyhow::Result<()> {
     ));
     let status = Arc::new(Mutex::new(HostStatus::Connecting));
 
-    let (connect_tx, connect_rx) = mpsc::channel::<ConnectRequest>(8);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<RuntimeCmd>(8);
     let (session_tx, session_rx) = mpsc::channel::<Result<ControllerHandle, String>>(8);
 
-    // Background Tokio runtime: the always-on host service plus a worker that
-    // establishes outgoing sessions on demand.
+    // Background Tokio runtime: the always-on host service (which can be
+    // re-pointed at a new relay) plus a worker for outgoing sessions.
     {
         let identity = Arc::new(identity);
         let relay_addr = relay_addr.clone();
@@ -78,32 +86,49 @@ pub fn run(opts: ConnectOpts) -> anyhow::Result<()> {
                 }
             };
             rt.block_on(async move {
-                tokio::spawn(host_service(
+                let current_relay = Arc::new(Mutex::new(relay_addr.clone()));
+                let mut host_task = tokio::spawn(host_service(
                     relay_addr.clone(),
                     identity.clone(),
                     display_name.clone(),
                     password.clone(),
                     status.clone(),
                 ));
-                let mut connect_rx = connect_rx;
-                while let Some(req) = connect_rx.recv().await {
-                    let identity = identity.clone();
-                    let relay_addr = relay_addr.clone();
-                    let name = display_name.clone();
-                    let out = session_tx.clone();
-                    tokio::spawn(async move {
-                        let res = establish_outgoing(&relay_addr, &identity, &name, req)
-                            .await
-                            .map_err(|e| e.to_string());
-                        let _ = out.send(res).await;
-                    });
+                while let Some(cmd) = ctrl_rx.recv().await {
+                    match cmd {
+                        RuntimeCmd::SetRelay(new_relay) => {
+                            host_task.abort();
+                            if let Ok(mut r) = current_relay.lock() {
+                                *r = new_relay.clone();
+                            }
+                            host_task = tokio::spawn(host_service(
+                                new_relay,
+                                identity.clone(),
+                                display_name.clone(),
+                                password.clone(),
+                                status.clone(),
+                            ));
+                        }
+                        RuntimeCmd::Connect(req) => {
+                            let identity = identity.clone();
+                            let name = display_name.clone();
+                            let relay = current_relay.lock().map(|r| r.clone()).unwrap_or_default();
+                            let out = session_tx.clone();
+                            tokio::spawn(async move {
+                                let res = establish_outgoing(&relay, &identity, &name, req)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                                let _ = out.send(res).await;
+                            });
+                        }
+                    }
                 }
             });
         });
     }
 
     let app = InsDeskApp::new(
-        device_id, public_hex, relay_addr, password, status, connect_tx, session_rx, opts.id,
+        device_id, public_hex, relay_addr, password, status, ctrl_tx, session_rx, opts.id,
     );
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -193,11 +218,12 @@ async fn establish_outgoing(
 struct InsDeskApp {
     device_id_fmt: String,
     public_hex: String,
-    relay_addr: String,
+    relay_input: String,
+    applied_relay: String,
     password: Arc<Mutex<String>>,
     status: Arc<Mutex<HostStatus>>,
 
-    connect_tx: mpsc::Sender<ConnectRequest>,
+    ctrl_tx: mpsc::Sender<RuntimeCmd>,
     session_rx: mpsc::Receiver<Result<ControllerHandle, String>>,
 
     partner_id: String,
@@ -216,17 +242,18 @@ impl InsDeskApp {
         relay_addr: String,
         password: Arc<Mutex<String>>,
         status: Arc<Mutex<HostStatus>>,
-        connect_tx: mpsc::Sender<ConnectRequest>,
+        ctrl_tx: mpsc::Sender<RuntimeCmd>,
         session_rx: mpsc::Receiver<Result<ControllerHandle, String>>,
         prefill_id: Option<u64>,
     ) -> Self {
         InsDeskApp {
             device_id_fmt: group_digits(device_id),
             public_hex,
-            relay_addr,
+            relay_input: relay_addr.clone(),
+            applied_relay: relay_addr,
             password,
             status,
-            connect_tx,
+            ctrl_tx,
             session_rx,
             partner_id: prefill_id.map(|id| id.to_string()).unwrap_or_default(),
             partner_password: String::new(),
@@ -243,12 +270,22 @@ impl InsDeskApp {
                 self.last_error = None;
                 self.connecting = true;
                 let req = ConnectRequest { partner_id, password: self.partner_password.clone() };
-                if self.connect_tx.try_send(req).is_err() {
+                if self.ctrl_tx.try_send(RuntimeCmd::Connect(req)).is_err() {
                     self.connecting = false;
                     self.last_error = Some("connection worker is busy; try again".into());
                 }
             }
             Err(_) => self.last_error = Some("enter a numeric Device ID".into()),
+        }
+    }
+
+    fn apply_relay(&mut self) {
+        let new_relay = self.relay_input.trim().to_string();
+        if new_relay.is_empty() || new_relay == self.applied_relay {
+            return;
+        }
+        if self.ctrl_tx.try_send(RuntimeCmd::SetRelay(new_relay.clone())).is_ok() {
+            self.applied_relay = new_relay;
         }
     }
 
@@ -287,8 +324,16 @@ impl InsDeskApp {
             ui.add_space(12.0);
             ui.separator();
             ui.horizontal(|ui| {
-                ui.label("Relay:");
-                ui.monospace(&self.relay_addr);
+                ui.label("Server:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.relay_input)
+                        .desired_width(200.0)
+                        .hint_text("host:9510"),
+                );
+                if ui.button("Apply").clicked() {
+                    self.apply_relay();
+                }
+                ui.weak("(the relay server address)");
             });
         });
     }
