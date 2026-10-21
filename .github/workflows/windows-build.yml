@@ -1,0 +1,37 @@
+name: Build Windows app
+
+# Builds the InsDesk desktop app (.exe) on a Windows runner and uploads it as a
+# downloadable artifact. Trigger it manually from the Actions tab
+# ("Run workflow"), or it runs automatically on pushes to the branch below.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/gallant-gates-b29u4v
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: Build the desktop app (gui + desktop + UAC bridge)
+        working-directory: client
+        run: cargo build --release --features "gui desktop uac-windows"
+
+      - name: Upload the Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: insdesk-client-windows-x64
+          path: client/target/release/insdesk-client.exe
+          if-no-files-found: error
