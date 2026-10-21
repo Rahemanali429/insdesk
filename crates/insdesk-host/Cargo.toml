@@ -1,0 +1,32 @@
+[package]
+name = "insdesk-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "InsDesk host agent — the machine that is viewed and controlled"
+
+[[bin]]
+name = "insdesk-host"
+path = "src/main.rs"
+
+[dependencies]
+insdesk-proto.workspace = true
+insdesk-crypto.workspace = true
+insdesk-net.workspace = true
+insdesk-media.workspace = true
+insdesk-fs.workspace = true
+insdesk-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+default = []
+## Real screen capture, input injection, clipboard and Windows UAC bridge.
+desktop = ["capture-scrap", "input-enigo", "clipboard-arboard"]
+capture-scrap = ["insdesk-media/capture-scrap", "insdesk-core/capture-scrap"]
+input-enigo = ["insdesk-media/input-enigo", "insdesk-core/input-enigo"]
+clipboard-arboard = ["insdesk-fs/clipboard-arboard", "insdesk-core/clipboard-arboard"]
+uac-windows = ["insdesk-media/uac-windows", "insdesk-core/uac-windows"]

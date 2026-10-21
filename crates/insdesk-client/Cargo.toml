@@ -1,0 +1,31 @@
+[package]
+name = "insdesk-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "InsDesk controller — view and control a remote host (CLI + optional egui GUI)"
+
+[[bin]]
+name = "insdesk-client"
+path = "src/main.rs"
+
+[dependencies]
+insdesk-proto.workspace = true
+insdesk-crypto.workspace = true
+insdesk-net.workspace = true
+insdesk-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+image.workspace = true
+
+# GUI (opt-in: needs OpenGL + a windowing system to build/run).
+eframe = { workspace = true, optional = true }
+egui = { workspace = true, optional = true }
+
+[features]
+default = []
+## Build the egui graphical controller (`insdesk-client gui ...`).
+gui = ["dep:eframe", "dep:egui"]

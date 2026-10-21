@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/insdesk-proto",
+    "crates/insdesk-crypto",
+    "crates/insdesk-net",
+    "crates/insdesk-media",
+    "crates/insdesk-fs",
+    "crates/insdesk-core",
+    "crates/insdesk-relay",
+    "crates/insdesk-host",
+    "crates/insdesk-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["insdesk contributors"]
+repository = "https://github.com/rahemanali429/insdesk"
+description = "InsDesk — a secure, end-to-end encrypted remote desktop (AnyDesk-style) written in Rust"
+
+[workspace.dependencies]
+# Internal
+insdesk-proto = { path = "crates/insdesk-proto" }
+insdesk-crypto = { path = "crates/insdesk-crypto" }
+insdesk-net = { path = "crates/insdesk-net" }
+insdesk-media = { path = "crates/insdesk-media" }
+insdesk-fs = { path = "crates/insdesk-fs" }
+insdesk-core = { path = "crates/insdesk-core" }
+
+# Async runtime / networking
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1.7"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Crypto (Noise protocol, pure Rust resolver)
+snow = { version = "0.9", default-features = false, features = ["default-resolver"] }
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Compression for the video codec
+flate2 = "1.0"
+
+# Diagnostics / CLI
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Platform backends (feature-gated by the crates that use them)
+scrap = "0.5"
+enigo = "0.2"
+arboard = "3.4"
+eframe = { version = "0.28", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.28"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1

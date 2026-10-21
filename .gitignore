@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Identity key files and runtime artifacts
+*.key
+*.log
+/screenshots

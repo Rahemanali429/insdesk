@@ -1,0 +1,25 @@
+[package]
+name = "insdesk-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "InsDesk session engines: host and controller orchestration over the E2E channel"
+
+[dependencies]
+insdesk-proto.workspace = true
+insdesk-crypto.workspace = true
+insdesk-net.workspace = true
+insdesk-media.workspace = true
+insdesk-fs.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+## Forwarded to insdesk-media / insdesk-fs for real desktop backends.
+capture-scrap = ["insdesk-media/capture-scrap"]
+input-enigo = ["insdesk-media/input-enigo"]
+uac-windows = ["insdesk-media/uac-windows"]
+clipboard-arboard = ["insdesk-fs/clipboard-arboard"]

@@ -1,0 +1,17 @@
+[package]
+name = "insdesk-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "End-to-end encryption for InsDesk: Noise channel, identity keys and device IDs"
+
+[dependencies]
+snow.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
