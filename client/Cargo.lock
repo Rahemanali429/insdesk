@@ -1419,21 +1419,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "insdesk-relay"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "clap",
- "insdesk-net",
- "insdesk-proto",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

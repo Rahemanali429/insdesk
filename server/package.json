@@ -1,0 +1,22 @@
+{
+  "name": "insdesk-server",
+  "version": "0.1.0",
+  "description": "InsDesk relay / rendezvous server (Express.js + TCP) — pairs hosts and controllers and forwards opaque end-to-end-encrypted traffic",
+  "license": "MIT OR Apache-2.0",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "bin": {
+    "insdesk-server": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

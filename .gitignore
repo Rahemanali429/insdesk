@@ -1,6 +1,12 @@
-/target
+# Rust (client/)
+target/
 **/*.rs.bk
 Cargo.lock.orig
+
+# Node (server/)
+node_modules/
+npm-debug.log*
+.env
 
 # Identity key files and runtime artifacts
 *.key
