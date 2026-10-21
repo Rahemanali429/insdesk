@@ -22,7 +22,12 @@ pub enum CaptureError {
 }
 
 /// A source of screen frames.
-pub trait ScreenCapturer: Send {
+///
+/// Implementations are created and driven entirely on one dedicated capture
+/// thread (see `insdesk-core::host`), so they need not be `Send` — this lets
+/// real backends like `scrap`, whose handles are not `Send` on some platforms,
+/// implement the trait directly.
+pub trait ScreenCapturer {
     /// The capture geometry. Stable for the capturer's lifetime.
     fn dimensions(&self) -> (u32, u32);
     /// Grab the current screen contents as a packed [`FrameBuffer`].

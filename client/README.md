@@ -65,16 +65,12 @@ and input when built on a desktop with `--features desktop`.
 ## Build
 
 ```bash
-# Core engine + all three binaries with portable backends (works anywhere,
-# including headless CI — uses a synthetic capturer and a recording input sink).
+# Core engine + binaries with portable backends (works anywhere, including
+# headless CI — synthetic capturer, recording input sink, in-memory clipboard).
 cargo build --release
 
-# Real desktop backends (needs X11+XTest / Windows / macOS dev libraries):
-cargo build --release -p insdesk-host   --features desktop
-cargo build --release -p insdesk-client --features gui
-
-# On Windows, add the UAC secure-desktop bridge:
-cargo build --release -p insdesk-host --features "desktop uac-windows"
+# Real desktop backends for the headless CLI host:
+cargo build --release -p insdesk-host --features desktop
 ```
 
 Run the test suite (all pure-Rust, no display needed):
@@ -83,23 +79,54 @@ Run the test suite (all pure-Rust, no display needed):
 cargo test --workspace
 ```
 
-## Quick start (three terminals)
+### Building the desktop app
+
+The AnyDesk-style window (`insdesk-client --gui`) is built with the `gui`
+feature, and `desktop` adds real screen capture / input / clipboard:
+
+```bash
+# Full desktop app (real capture + input + clipboard):
+cargo run --release -p insdesk-client --features "gui desktop" -- --gui --relay <SERVER>:9510
+
+# UI only, with a synthetic screen (handy to try the interface):
+cargo run --release -p insdesk-client --features gui -- --gui --relay <SERVER>:9510
+
+# On Windows, add the UAC secure-desktop bridge:
+#   cargo run --release -p insdesk-client --features "gui desktop uac-windows" -- --gui ...
+```
+
+**Linux build prerequisites.** The GUI (winit/glutin/glow) and the real
+backends need these dev libraries. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y \
+    build-essential pkg-config \
+    libgl1-mesa-dev libxkbcommon-dev libwayland-dev \
+    libx11-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev \
+    libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev \
+    libxdo-dev
+```
+
+macOS and Windows need no extra system packages (Xcode command-line tools /
+MSVC toolchain only).
+
+## Quick start
 
 The relay / rendezvous **server lives in `../server`** (an Express.js + TCP app).
-Start it first, then the two Rust peers:
+Start it first, then launch the desktop app on each machine:
 
 ```bash
 # 1) Relay / rendezvous server (Express.js) — from the repo root
 (cd ../server && npm install && npm start)   # TCP relay :9510, HTTP status :9520
 
-# 2) Host agent — prints its device ID on startup
-cargo run --release -p insdesk-host -- \
-    --relay 127.0.0.1:9510 --name my-pc --password hunter2
-
-# 3) Controller — dial the host's device ID
-cargo run --release -p insdesk-client --features gui -- \
-    --relay 127.0.0.1:9510 --id <DEVICE_ID> --password hunter2 --gui
+# 2) Desktop app on each machine — shows its own Device ID + password,
+#    and provides a box to connect to another machine.
+cargo run --release -p insdesk-client --features "gui desktop" -- --gui \
+    --relay 127.0.0.1:9510
 ```
+
+In the app, read your own **Device ID + password** under *This Desk*; to control
+another machine, enter its ID + password under *Remote Desk* and click Connect.
 
 ### Headless controller (no GUI, scriptable)
 

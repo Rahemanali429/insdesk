@@ -17,7 +17,10 @@ pub enum InputError {
 }
 
 /// Something that can replay input events on the local machine.
-pub trait InputSink: Send {
+///
+/// Driven on one dedicated I/O thread, so it need not be `Send` (the real
+/// `enigo` backend is not `Send` on some platforms).
+pub trait InputSink {
     fn inject(&mut self, event: InputEvent) -> Result<(), InputError>;
 }
 
@@ -89,8 +92,28 @@ mod enigo_backend {
             Key::Alt => EKey::Alt,
             Key::Meta => EKey::Meta,
             Key::CapsLock => EKey::CapsLock,
-            Key::F(n) => EKey::F(n),
+            Key::F(n) => return map_function_key(n),
             Key::Char(c) => EKey::Unicode(c),
+        })
+    }
+
+    /// enigo 0.2 models function keys as distinct `F1..F12` variants rather than
+    /// a parameterized `F(n)`, so map the common range explicitly.
+    fn map_function_key(n: u8) -> Option<EKey> {
+        Some(match n {
+            1 => EKey::F1,
+            2 => EKey::F2,
+            3 => EKey::F3,
+            4 => EKey::F4,
+            5 => EKey::F5,
+            6 => EKey::F6,
+            7 => EKey::F7,
+            8 => EKey::F8,
+            9 => EKey::F9,
+            10 => EKey::F10,
+            11 => EKey::F11,
+            12 => EKey::F12,
+            _ => return None,
         })
     }
 

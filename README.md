@@ -69,59 +69,57 @@ curl http://localhost:9520/status
 # {"service":"insdesk-relay","status":"ok","hostsWaiting":0,...}
 ```
 
-> Running the host and controller on **different machines**? Start the server on
-> a host reachable by both (open TCP `9510`), and use its address/hostname in
-> place of `127.0.0.1` in the commands below.
+> Running on **different machines**? Start the server on a host reachable by
+> both (open TCP `9510`), and pass its address with `--relay <host>:9510` below.
 
-### 2 — Start the host (the machine to be controlled)
+### 2 — Launch the desktop app on each machine
 
-```bash
-cd client
-cargo run --release -p insdesk-host -- \
-    --relay 127.0.0.1:9510 --name my-pc --password hunter2
-```
-
-On startup it prints a **Device ID** (a 9-digit number) and its public key.
-Note the Device ID — the controller needs it. The `/status` endpoint from step 1
-will now list that ID under `hostsWaiting`.
-
-### 3 — Connect the controller
-
-**Graphical UI** (needs a desktop with OpenGL; build with the `gui` feature):
+The desktop app is the AnyDesk-style window: it shows **this** machine's Device
+ID + password (so others can connect to you) **and** has a box to connect out to
+another machine. Build it with native backends so it captures the real screen
+and injects real input:
 
 ```bash
 cd client
-cargo run --release -p insdesk-client --features gui -- \
-    --relay 127.0.0.1:9510 --id <DEVICE_ID> --password hunter2 --gui
+cargo run --release -p insdesk-client --features "gui desktop" -- --gui \
+    --relay 127.0.0.1:9510
 ```
 
-**Headless / scriptable** (works anywhere — snapshot the screen, browse and
-move files, no GUI):
+On Linux you need the usual GUI/desktop dev libraries to build it (see
+[client/README.md](client/README.md#building-the-desktop-app)); on Windows add
+`uac-windows` to the feature list for the UAC secure-desktop bridge. Without a
+display (or to try the UI with a synthetic screen) drop `desktop` and use just
+`--features gui`.
+
+The window shows **Your Device ID** and a **password** under *This Desk*. The
+app registers with the server automatically — the `/status` endpoint from step 1
+will list your ID under `hostsWaiting`.
+
+### 3 — Connect
+
+On the controlling machine, type the **other** machine's Device ID and its
+password into the *Remote Desk* box and click **Connect**. The window switches to
+a live view of that screen with full mouse/keyboard control, quality controls,
+clipboard push and a remote file list. Share your own ID + password from *This
+Desk* to let someone connect the other way.
+
+### Headless / scriptable controller (no GUI)
+
+For automation or servers without a display, the same binary without `--gui`
+runs a scriptable controller — snapshot the screen, browse and move files:
 
 ```bash
 cd client
 cargo run --release -p insdesk-client -- \
-    --relay 127.0.0.1:9510 --id <DEVICE_ID> --password hunter2 \
+    --relay 127.0.0.1:9510 --id <DEVICE_ID> --password <PASSWORD> \
     --ls "." \
     --download "report.pdf:/tmp/report.pdf" \
     --upload   "/tmp/patch.bin:incoming/patch.bin" \
     --snapshot /tmp/remote.png
 ```
 
-### Real desktop capture, input and clipboard
-
-The default host build streams a synthetic test image and records (does not
-perform) input, so it runs on headless machines. To control a **real** desktop,
-build the host with native backends (needs the platform dev libraries — X11 +
-XTest on Linux, nothing extra on Windows/macOS):
-
-```bash
-cd client
-cargo run --release -p insdesk-host --features desktop -- \
-    --relay 127.0.0.1:9510 --name my-pc --password hunter2
-# On Windows, add the UAC secure-desktop bridge:
-#   cargo run --release -p insdesk-host --features "desktop uac-windows" -- ...
-```
+A matching headless host (synthetic screen, runs anywhere) is also available as
+`insdesk-host` — see [client/README.md](client/README.md).
 
 ### Direct connection (no server)
 

@@ -4,9 +4,27 @@
 //! 1. exchanges [`Hello`] greetings,
 //! 2. verifies the controller's channel-bound password proof (if a password is
 //!    configured) and makes an accept/decline decision,
-//! 3. streams the screen (capture → encode → send) on a dedicated thread,
-//! 4. replays the controller's input, serves file transfers and clipboard, and
-//!    bridges UAC / secure-desktop notifications.
+//! 3. streams the screen (capture → encode → send) on a dedicated capture
+//!    thread,
+//! 4. replays the controller's input and mirrors the clipboard on a dedicated
+//!    I/O thread, serves file transfers, and bridges UAC / secure-desktop
+//!    notifications.
+//!
+//! ## Threading
+//!
+//! Real OS backends (`scrap` capture, `enigo` input, `arboard` clipboard) are
+//! not `Send` on every platform, so each is **created and used entirely on one
+//! dedicated OS thread** and never crosses a thread boundary. The async session
+//! task communicates with those threads over channels:
+//!
+//! ```text
+//!   capture thread ──VideoFrame/Elevation──▶ session sender
+//!   async loop ──IoCommand(input/clipboard-set)──▶ I/O thread
+//!   I/O thread ──local clipboard change──▶ session sender
+//! ```
+//!
+//! Because the backends live behind factories (`FnOnce() -> Box<…>`), the async
+//! task itself holds only `Send` state and can be freely spawned.
 
 use crate::session_support::{compute_accept, SessionAuth};
 use anyhow::{anyhow, Result};
@@ -17,12 +35,21 @@ use insdesk_media::input::InputSink;
 use insdesk_media::uac::{ElevationBridge, SecureDesktopEvent};
 use insdesk_net::{Session, SessionMeta, SessionSender};
 use insdesk_proto::{
-    ElevationMsg, Features, FileMsg, Hello, Message, PixelFormat, Role, VideoConfig, VideoFrame,
+    ClipboardData, ElevationMsg, Features, FileMsg, Hello, InputEvent, Message, PixelFormat, Role,
+    VideoConfig, VideoFrame,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Builds a screen capturer on the capture thread.
+pub type CapturerFactory = Box<dyn FnOnce() -> Box<dyn ScreenCapturer> + Send>;
+/// Builds an input sink on the I/O thread.
+pub type InputFactory = Box<dyn FnOnce() -> Box<dyn InputSink> + Send>;
+/// Builds a clipboard backend on the I/O thread.
+pub type ClipboardFactory = Box<dyn FnOnce() -> Box<dyn ClipboardBackend> + Send>;
 
 /// Configuration for a host session.
 #[derive(Clone)]
@@ -61,14 +88,20 @@ impl Default for HostConfig {
     }
 }
 
-/// Backends the host drives. Kept as trait objects so the same engine runs with
-/// synthetic backends (headless/CI) or real ones (desktop builds).
+/// Backends the host drives, as thread-local factories so non-`Send` OS handles
+/// are constructed on their own thread.
 pub struct HostBackends {
-    pub capturer: Box<dyn ScreenCapturer>,
-    pub input: Box<dyn InputSink>,
-    pub clipboard: Box<dyn ClipboardBackend>,
+    pub capturer: CapturerFactory,
+    pub input: InputFactory,
+    pub clipboard: ClipboardFactory,
     pub elevation: Box<dyn ElevationBridge>,
     pub files: FileService,
+}
+
+/// A command sent from the async loop to the dedicated I/O thread.
+enum IoCommand {
+    Input(InputEvent),
+    ClipboardSet(ClipboardData),
 }
 
 struct Shared {
@@ -80,7 +113,7 @@ struct Shared {
     elevation_requested: AtomicBool,
 }
 
-/// Run a host session to completion over `established`/`session`.
+/// Run a host session to completion.
 pub async fn run(
     session: Session,
     meta: &SessionMeta,
@@ -100,14 +133,11 @@ pub async fn run(
         }))
         .await?;
 
-    // Expect the controller's Hello first.
     match next_message(&mut receiver).await? {
         Message::Hello(h) => tracing::info!(peer = %h.display_name, "controller connected"),
         other => return Err(anyhow!("expected Hello, got {other:?}")),
     }
 
-    // Password proof (channel-bound). If no password is configured we accept
-    // any proof; otherwise it must match.
     let auth = SessionAuth { password: cfg.password.clone() };
     match next_message(&mut receiver).await? {
         Message::AuthRequest { proof } => {
@@ -127,8 +157,6 @@ pub async fn run(
         other => return Err(anyhow!("expected AuthRequest, got {other:?}")),
     }
 
-    // Local accept decision (unattended vs prompt). The prompt itself lives in
-    // the binary; here we honor the configured policy.
     let accepted = compute_accept(cfg.auto_accept);
     sender
         .send(Message::SessionDecision {
@@ -141,17 +169,7 @@ pub async fn run(
         return Ok(());
     }
 
-    // --- Start streaming ----------------------------------------------------
-    let (width, height) = capturer.dimensions();
-    sender
-        .send(Message::VideoConfig(VideoConfig {
-            width,
-            height,
-            pixel_format: PixelFormat::Bgra8888,
-            tile_size: cfg.tile_size,
-        }))
-        .await?;
-
+    // --- Start the capture + I/O threads ------------------------------------
     let shared = Arc::new(Shared {
         want_keyframe: AtomicBool::new(true),
         quality: AtomicU8::new(cfg.quality),
@@ -161,47 +179,54 @@ pub async fn run(
         elevation_requested: AtomicBool::new(false),
     });
 
-    // Capture/encode/elevation loop on a dedicated thread (blocking capture).
-    let capture_thread = spawn_capture_thread(
-        capturer,
-        elevation,
-        shared.clone(),
-        cfg.tile_size,
-        width,
-        height,
-        sender.clone(),
-    );
+    let (dims_tx, dims_rx) = tokio::sync::oneshot::channel::<(u32, u32)>();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let (io_tx, io_rx) = mpsc::channel::<IoCommand>();
+    let (clip_tx, clip_rx) = mpsc::channel::<ClipboardData>();
+
+    let capture_thread =
+        spawn_capture_thread(capturer, elevation, shared.clone(), cfg.tile_size, sender.clone(), dims_tx, go_rx);
+    let io_thread = spawn_io_thread(input, clipboard, io_rx, clip_tx);
+
+    // The capture thread reports the real display geometry; announce it, then
+    // release the thread to start streaming.
+    let (width, height) = match dims_rx.await {
+        Ok(d) => d,
+        Err(_) => {
+            shared.running.store(false, Ordering::SeqCst);
+            return Err(anyhow!("capture thread failed to initialize"));
+        }
+    };
+    sender
+        .send(Message::VideoConfig(VideoConfig {
+            width,
+            height,
+            pixel_format: PixelFormat::Bgra8888,
+            tile_size: cfg.tile_size,
+        }))
+        .await?;
+    let _ = go_tx.send(());
+
+    // Bridge local clipboard changes (produced on the I/O thread) to the peer.
+    let clip_sender = sender.clone();
+    let clip_bridge = tokio::task::spawn_blocking(move || {
+        while let Ok(change) = clip_rx.recv() {
+            if clip_sender.blocking_send(Message::Clipboard(change)).is_err() {
+                break;
+            }
+        }
+    });
 
     // --- Main receive loop --------------------------------------------------
     let files = Arc::new(files);
-    let mut input = input;
-    let mut clipboard = clipboard;
     let mut inbound: HashMap<u64, InboundTransfer> = HashMap::new();
-
-    // Periodically push local clipboard changes to the controller.
-    let clip_sender = sender.clone();
 
     let result = async {
         loop {
             match receiver.recv().await {
                 Some(Ok(msg)) => {
-                    if !handle_message(
-                        msg,
-                        &cfg,
-                        &sender,
-                        &shared,
-                        input.as_mut(),
-                        clipboard.as_mut(),
-                        &files,
-                        &mut inbound,
-                    )
-                    .await?
-                    {
-                        break; // Bye
-                    }
-                    // Opportunistically forward a local clipboard change.
-                    if let Ok(Some(change)) = clipboard.take_change() {
-                        let _ = clip_sender.send(Message::Clipboard(change)).await;
+                    if !handle_message(msg, &cfg, &sender, &shared, &io_tx, &files, &mut inbound).await? {
+                        break;
                     }
                 }
                 Some(Err(e)) => {
@@ -215,8 +240,14 @@ pub async fn run(
     }
     .await;
 
+    // Tear down: stopping `running` ends the capture thread; dropping `io_tx`
+    // ends the I/O thread, which drops `clip_tx` and ends the bridge.
     shared.running.store(false, Ordering::SeqCst);
+    let _ = go_tx.send(());
+    drop(io_tx);
     let _ = capture_thread.join();
+    let _ = io_thread.join();
+    clip_bridge.abort();
     result
 }
 
@@ -226,17 +257,14 @@ async fn handle_message(
     cfg: &HostConfig,
     sender: &SessionSender,
     shared: &Arc<Shared>,
-    input: &mut dyn InputSink,
-    clipboard: &mut dyn ClipboardBackend,
+    io_tx: &mpsc::Sender<IoCommand>,
     files: &Arc<FileService>,
     inbound: &mut HashMap<u64, InboundTransfer>,
 ) -> Result<bool> {
     match msg {
         Message::Input(ev) => {
             if cfg.allow_input {
-                if let Err(e) = input.inject(ev) {
-                    tracing::debug!("input inject failed: {e}");
-                }
+                let _ = io_tx.send(IoCommand::Input(ev));
             }
         }
         Message::RequestKeyframe => shared.want_keyframe.store(true, Ordering::SeqCst),
@@ -245,7 +273,7 @@ async fn handle_message(
             shared.max_fps.store(q.max_fps.max(1), Ordering::SeqCst);
         }
         Message::Clipboard(data) => {
-            let _ = clipboard.set(&data);
+            let _ = io_tx.send(IoCommand::ClipboardSet(data));
         }
         Message::File(fmsg) => {
             if cfg.allow_file_transfer {
@@ -303,7 +331,6 @@ async fn handle_file(
             let _ = sender.send(Message::File(files.remove(&path))).await;
         }
         FileMsg::DownloadRequest { transfer, path } => {
-            // Controller wants to pull `path` from us → stream it out.
             match files.open_outbound(transfer, &path) {
                 Ok(out) => {
                     let size = out.size();
@@ -318,7 +345,6 @@ async fn handle_file(
             }
         }
         FileMsg::UploadRequest { transfer, dest, size } => {
-            // Controller wants to push a file to us → open the destination.
             match files.open_inbound(transfer, &dest, size) {
                 Ok(inb) => {
                     inbound.insert(transfer, inb);
@@ -357,17 +383,28 @@ async fn handle_file(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The dedicated capture thread: owns the (possibly non-`Send`) capturer and
+/// elevation bridge, reports the display geometry, then streams encoded frames.
 fn spawn_capture_thread(
-    mut capturer: Box<dyn ScreenCapturer>,
+    capturer_factory: CapturerFactory,
     mut elevation: Box<dyn ElevationBridge>,
     shared: Arc<Shared>,
     tile_size: u32,
-    width: u32,
-    height: u32,
     sender: SessionSender,
+    dims_tx: tokio::sync::oneshot::Sender<(u32, u32)>,
+    go_rx: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let mut capturer = capturer_factory();
+        let (width, height) = capturer.dimensions();
+        if dims_tx.send((width, height)).is_err() {
+            return;
+        }
+        // Wait until the geometry has been announced to the peer.
+        if go_rx.recv().is_err() {
+            return;
+        }
+
         let mut encoder = Encoder::new(width, height, tile_size);
         let mut seq: u64 = 0;
         let mut first = true;
@@ -376,11 +413,9 @@ fn spawn_capture_thread(
             let fps = shared.max_fps.load(Ordering::SeqCst).clamp(1, 60) as u64;
             let interval = Duration::from_millis(1000 / fps);
 
-            // Elevation / secure-desktop handling.
             if let Some(ev) = elevation.poll() {
                 let active = matches!(ev, SecureDesktopEvent::Activated);
                 let _ = sender.blocking_send(Message::Elevation(ElevationMsg::SecureDesktopActive { active }));
-                // A secure desktop implies the view changed entirely.
                 encoder.request_keyframe();
             }
             if shared.elevation_requested.swap(false, Ordering::SeqCst) {
@@ -390,32 +425,30 @@ fn spawn_capture_thread(
                 };
                 let elevated =
                     matches!(elevation.privilege_level(), insdesk_media::uac::PrivilegeLevel::Elevated);
-                let _ = sender.blocking_send(Message::Elevation(ElevationMsg::ElevationStatus { elevated, detail }));
+                let _ = sender
+                    .blocking_send(Message::Elevation(ElevationMsg::ElevationStatus { elevated, detail }));
             }
 
             encoder.set_quality(shared.quality.load(Ordering::SeqCst));
             let force = shared.want_keyframe.swap(false, Ordering::SeqCst) || first;
 
             match capturer.capture() {
-                Ok(fb) => {
-                    match encoder.encode(&fb, force) {
-                        Ok(encoded) => {
-                            let vf = VideoFrame {
-                                seq,
-                                keyframe: force,
-                                captured_unix_millis: now_millis(),
-                                payload: encoded,
-                            };
-                            // Drop video under backpressure to protect latency.
-                            if !sender.try_send(Message::VideoFrame(vf)) {
-                                tracing::trace!("video queue full; dropping frame {seq}");
-                            }
-                            seq += 1;
-                            first = false;
+                Ok(fb) => match encoder.encode(&fb, force) {
+                    Ok(encoded) => {
+                        let vf = VideoFrame {
+                            seq,
+                            keyframe: force,
+                            captured_unix_millis: now_millis(),
+                            payload: encoded,
+                        };
+                        if !sender.try_send(Message::VideoFrame(vf)) {
+                            tracing::trace!("video queue full; dropping frame {seq}");
                         }
-                        Err(e) => tracing::warn!("encode error: {e}"),
+                        seq += 1;
+                        first = false;
                     }
-                }
+                    Err(e) => tracing::warn!("encode error: {e}"),
+                },
                 Err(insdesk_media::capture::CaptureError::WouldBlock) => {}
                 Err(e) => tracing::warn!("capture error: {e}"),
             }
@@ -429,7 +462,40 @@ fn spawn_capture_thread(
     })
 }
 
-// --- tiny helpers -----------------------------------------------------------
+/// The dedicated I/O thread: owns the (possibly non-`Send`) input sink and
+/// clipboard, replays input commands, and reports local clipboard changes.
+fn spawn_io_thread(
+    input_factory: InputFactory,
+    clipboard_factory: ClipboardFactory,
+    io_rx: mpsc::Receiver<IoCommand>,
+    clip_tx: mpsc::Sender<ClipboardData>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut input = input_factory();
+        let mut clipboard = clipboard_factory();
+        loop {
+            match io_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(IoCommand::Input(ev)) => {
+                    if let Err(e) = input.inject(ev) {
+                        tracing::debug!("input inject failed: {e}");
+                    }
+                }
+                Ok(IoCommand::ClipboardSet(data)) => {
+                    let _ = clipboard.set(&data);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            // Mirror a local clipboard change to the peer.
+            if let Ok(Some(change)) = clipboard.take_change() {
+                if clip_tx.send(change).is_err() {
+                    break;
+                }
+            }
+        }
+        tracing::debug!("io thread exiting");
+    })
+}
 
 fn now_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)

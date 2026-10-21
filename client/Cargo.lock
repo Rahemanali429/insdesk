@@ -1336,6 +1336,7 @@ dependencies = [
  "insdesk-media",
  "insdesk-net",
  "insdesk-proto",
+ "rand",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

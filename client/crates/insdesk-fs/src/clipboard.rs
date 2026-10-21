@@ -16,7 +16,10 @@ pub enum ClipboardError {
 
 /// Read/write access to a clipboard, plus change detection so we only transmit
 /// on an actual change (avoiding feedback loops between the two peers).
-pub trait ClipboardBackend: Send {
+///
+/// Driven on one dedicated I/O thread, so it need not be `Send` (the real
+/// `arboard` backend is not `Send` on some platforms).
+pub trait ClipboardBackend {
     /// Set the clipboard contents (applying what the peer sent).
     fn set(&mut self, data: &ClipboardData) -> Result<(), ClipboardError>;
     /// Return the current contents if they changed since the last call.

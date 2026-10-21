@@ -27,5 +27,13 @@ egui = { workspace = true, optional = true }
 
 [features]
 default = []
-## Build the egui graphical controller (`insdesk-client gui ...`).
+## Build the graphical desktop app (home screen + background host + viewer).
 gui = ["dep:eframe", "dep:egui"]
+## Real desktop backends for the in-app host (screen capture, input, clipboard).
+desktop = [
+    "insdesk-core/capture-scrap",
+    "insdesk-core/input-enigo",
+    "insdesk-core/clipboard-arboard",
+]
+## Windows UAC secure-desktop bridge for the in-app host.
+uac-windows = ["insdesk-core/uac-windows"]
